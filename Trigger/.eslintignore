@@ -1,0 +1,11 @@
+node_modules
+dist
+coverage
+build
+*.log
+*.tsbuildinfo
+*.tgz
+*.zip
+pnpm-lock.yaml
+yarn.lock
+package-lock.json

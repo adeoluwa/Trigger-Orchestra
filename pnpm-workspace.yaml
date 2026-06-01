@@ -1,0 +1,4 @@
+packages:
+  - 'Trigger'
+  - 'apps/*'
+  - 'packages/*'
