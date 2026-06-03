@@ -20,7 +20,13 @@ async function request<T>(
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.message ?? `Request failed: ${res.status}`);
+    // Backend error shape: { success: false, error: { code, message, fields? } }
+    const errMsg = body?.error?.message ?? body?.message ?? `Request failed: ${res.status}`;
+    const fields = body?.error?.fields as Record<string, string> | undefined;
+    const fieldSummary = fields
+      ? Object.entries(fields).map(([k, v]) => `${k}: ${v}`).join(', ')
+      : null;
+    throw new Error(fieldSummary ? `${errMsg} (${fieldSummary})` : errMsg);
   }
 
   return res.json();

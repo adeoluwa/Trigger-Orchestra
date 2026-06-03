@@ -22,3 +22,11 @@ export function useProject(id: string) {
   );
   return { project: data?.data, isLoading, error, mutate };
 }
+
+export async function updateProject(id: string, body: { name?: string; repoUrl?: string; configPath?: string }) {
+  return api.patch<ApiResponse<Project>>(`/projects/${id}`, body);
+}
+
+export async function deleteProject(id: string) {
+  return api.delete(`/projects/${id}`);
+}

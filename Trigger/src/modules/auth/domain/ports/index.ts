@@ -15,9 +15,23 @@ export interface GitHubProfile {
   name: string | null
 }
 
+export interface GitHubRepo {
+  id: number
+  name: string
+  full_name: string
+  description: string | null
+  html_url: string
+  private: boolean
+  language: string | null
+  updated_at: string
+  stargazers_count: number
+  default_branch: string
+}
+
 export interface GitHubOAuthPort {
   getAccessToken(code: string): Promise<string>
   getUserProfile(accessToken: string): Promise<GitHubProfile>
+  getRepos(accessToken: string): Promise<GitHubRepo[]>
 }
 
 export interface TokenService {

@@ -2,9 +2,15 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import type { User, AuthResponse, ApiResponse, LoginRequest, RegisterRequest } from "@trigger-orchestra/shared";
+import type { User, AuthResponse, LoginRequest, RegisterRequest } from "@trigger-orchestra/shared";
 import { api } from "@/lib/api";
 import { saveTokens, saveUser, clearTokens, getStoredUser } from "@/lib/auth";
+
+function extractPayload(body: Record<string, unknown>): AuthResponse {
+  // Backend wraps in { success, data: { user, accessToken, refreshToken } }
+  const payload = (body.data ?? body) as AuthResponse;
+  return payload;
+}
 
 export function useAuth() {
   const router = useRouter();
@@ -21,10 +27,12 @@ export function useAuth() {
     setLoading(true);
     setError(null);
     try {
-      const res = await api.post<ApiResponse<AuthResponse>>("/auth/login", data);
-      saveTokens(res.data!.tokens.accessToken, res.data!.tokens.refreshToken);
-      saveUser(res.data!.user);
-      setUser(res.data!.user);
+      const body = await api.post<Record<string, unknown>>("/auth/login", data);
+      const payload = extractPayload(body);
+      if (!payload.accessToken) throw new Error("Invalid server response");
+      saveTokens(payload.accessToken, payload.refreshToken);
+      saveUser(payload.user);
+      setUser(payload.user);
       router.push("/dashboard");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed");
@@ -37,10 +45,12 @@ export function useAuth() {
     setLoading(true);
     setError(null);
     try {
-      const res = await api.post<ApiResponse<AuthResponse>>("/auth/register", data);
-      saveTokens(res.data!.tokens.accessToken, res.data!.tokens.refreshToken);
-      saveUser(res.data!.user);
-      setUser(res.data!.user);
+      const body = await api.post<Record<string, unknown>>("/auth/register", data);
+      const payload = extractPayload(body);
+      if (!payload.accessToken) throw new Error("Invalid server response");
+      saveTokens(payload.accessToken, payload.refreshToken);
+      saveUser(payload.user);
+      setUser(payload.user);
       router.push("/dashboard");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Registration failed");

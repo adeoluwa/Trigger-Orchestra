@@ -65,7 +65,10 @@ const options: swaggerJsdoc.Options = {
 
     security: [{ bearerAuth: [] }],
   },
-  apis: ['./src/modules/**/adapters/inbound/http/*.spec.ts'],
+  apis: [
+    './src/modules/**/adapters/inbound/http/*.spec.ts',
+    './src/modules/**/adapters/inbound/*.spec.ts',
+  ],
 }
 
 const swaggerSpec = swaggerJsdoc(options)

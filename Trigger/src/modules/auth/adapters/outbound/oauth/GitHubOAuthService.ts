@@ -1,5 +1,5 @@
 import axios from 'axios'
-import { GitHubOAuthPort, GitHubProfile } from '@modules/auth/domain/ports'
+import type { GitHubOAuthPort, GitHubProfile, GitHubRepo } from '@modules/auth/domain/ports'
 import { env } from '@config/env'
 
 export class GitHubOAuthService implements GitHubOAuthPort {
@@ -48,5 +48,19 @@ export class GitHubOAuthService implements GitHubOAuthPort {
       email,
       name: profile.name ?? null,
     }
+  }
+
+  async getRepos(accessToken: string): Promise<GitHubRepo[]> {
+    const headers = {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: 'application/vnd.github+json',
+    }
+
+    const { data } = await axios.get<GitHubRepo[]>(
+      'https://api.github.com/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator',
+      { headers }
+    )
+
+    return data
   }
 }

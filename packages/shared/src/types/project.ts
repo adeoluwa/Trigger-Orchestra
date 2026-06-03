@@ -1,12 +1,8 @@
 export interface Project {
   id: string;
   name: string;
-  description?: string;
-  repositoryUrl?: string;
-  repositoryOwner?: string;
-  repositoryName?: string;
-  defaultBranch?: string;
-  yamlConfig?: string;
+  repoUrl: string;
+  configPath: string;
   userId: string;
   environments: Environment[];
   createdAt: string;
@@ -23,12 +19,6 @@ export interface Environment {
 
 export interface CreateProjectRequest {
   name: string;
-  description?: string;
-  repositoryUrl?: string;
-  repositoryOwner?: string;
-  repositoryName?: string;
-  defaultBranch?: string;
-  yamlConfig?: string;
+  repoUrl: string;
+  configPath?: string;
 }
-
-export interface UpdateProjectRequest extends Partial<CreateProjectRequest> {}

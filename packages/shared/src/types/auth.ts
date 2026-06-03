@@ -1,16 +1,23 @@
 export interface User {
   id: string;
   email: string;
-  username: string;
-  avatarUrl?: string;
-  githubId?: string;
-  createdAt: string;
-  updatedAt: string;
+  name: string;
+  githubUsername?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
-export interface AuthTokens {
-  accessToken: string;
-  refreshToken: string;
+export interface GithubRepo {
+  id: number;
+  name: string;
+  full_name: string;
+  description: string | null;
+  html_url: string;
+  private: boolean;
+  language: string | null;
+  updated_at: string;
+  stargazers_count: number;
+  default_branch: string;
 }
 
 export interface LoginRequest {
@@ -20,11 +27,12 @@ export interface LoginRequest {
 
 export interface RegisterRequest {
   email: string;
-  username: string;
+  name: string;
   password: string;
 }
 
 export interface AuthResponse {
   user: User;
-  tokens: AuthTokens;
+  accessToken: string;
+  refreshToken: string;
 }

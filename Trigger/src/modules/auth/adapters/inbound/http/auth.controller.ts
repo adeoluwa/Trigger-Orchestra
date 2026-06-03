@@ -52,8 +52,23 @@ export class AuthController {
   }
 
   me = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-    const userProfile = (req as AuthenticatedRequest).user
-    res.status(HttpStatus.OK).json(successResponse(userProfile))
+    try {
+      const { id } = (req as AuthenticatedRequest).user
+      const profile = await this.authService.getProfile(id)
+      res.status(HttpStatus.OK).json(successResponse(profile))
+    } catch (error) {
+      next(error)
+    }
+  }
+
+  githubRepos = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const { id } = (req as AuthenticatedRequest).user
+      const repos = await this.authService.getGithubRepos(id)
+      res.status(HttpStatus.OK).json(successResponse(repos))
+    } catch (error) {
+      next(error)
+    }
   }
 
   githubRedirect = (_req: Request, res: Response): void => {
@@ -74,7 +89,7 @@ export class AuthController {
 
       const result = await this.authService.githubLogin(code)
 
-      const frontendUrl = new URL('/auth/callback', env.APP_URL)
+      const frontendUrl = new URL('/auth/callback', env.FRONTEND_URL)
       frontendUrl.searchParams.set('token', result.accessToken)
       frontendUrl.searchParams.set('refreshToken', result.refreshToken)
 

@@ -88,6 +88,20 @@ export class AuthService {
     return { user: { id: user.id, email: user.email, name: user.name }, accessToken, refreshToken }
   }
 
+  async getProfile(userId: string) {
+    const user = await this.authRepository.findbyId(userId)
+    if (!user) throw new UnauthorizedError('User not found')
+    return { id: user.id, email: user.email, name: user.name, githubUsername: user.githubUsername }
+  }
+
+  async getGithubRepos(userId: string) {
+    if (!this.githubOAuth) throw new Error('GitHub OAuth is not configured')
+    const user = await this.authRepository.findbyId(userId)
+    if (!user) throw new UnauthorizedError('User not found')
+    if (!user.githubToken) throw new UnauthorizedError('No GitHub token — please sign in with GitHub first')
+    return this.githubOAuth.getRepos(user.githubToken)
+  }
+
   async refresh(dto: RefreshTokenDto): Promise<RefreshResult> {
     const payload = this.tokenService.verifyRefreshToken(dto.refreshToken);
 

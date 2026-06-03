@@ -35,7 +35,5 @@ export interface DeploymentLog {
 
 export interface TriggerDeploymentRequest {
   projectId: string;
-  environmentId?: string;
-  provider: DeploymentProvider;
-  branch?: string;
+  environmentId: string;
 }
