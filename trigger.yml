@@ -1,0 +1,10 @@
+project: "Trigger-Orchestra"
+repo: "https://github.com/adeoluwa/Trigger-Orchestra"
+
+environments:
+  staging:
+    branch: "develop"
+    platform: "railway"
+  live:
+    branch: "main"
+    platform: "render"
