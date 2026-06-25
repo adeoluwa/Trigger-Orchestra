@@ -32,6 +32,14 @@ export interface GitHubOAuthPort {
   getAccessToken(code: string): Promise<string>
   getUserProfile(accessToken: string): Promise<GitHubProfile>
   getRepos(accessToken: string): Promise<GitHubRepo[]>
+  createFile(
+    accessToken: string,
+    owner: string,
+    repo: string,
+    path: string,
+    content: string,
+    message: string
+  ): Promise<void>
 }
 
 export interface TokenService {

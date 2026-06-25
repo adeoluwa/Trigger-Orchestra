@@ -1,7 +1,6 @@
 import axios from 'axios'
 import { RepositoryProviderPort } from '@modules/project/domain/ports'
 import { ExternalServiceError } from '@shared/errors'
-
 import { logger } from '@infra/logger/logger'
 
 const GITHUB_API_BASE = 'https://api.github.com'
@@ -37,21 +36,38 @@ export class GitHubRepositoryProvider implements RepositoryProviderPort {
   ): Promise<{ sha: string; message: string }> {
     try {
       const res = await axios.get(
-        // `${GITHUB_API_BASE}/repos/${repoToPath(repoUrl)}/commits/${branch}`,
         `${GITHUB_API_BASE}/repos/${repoToPath(repoUrl)}/commits/${encodeURIComponent(branch)}`,
         { headers: headers(token) }
       )
 
       return { sha: res.data.sha, message: res.data.commit.message }
     } catch (error) {
-      const exception = error as Error
+      if (axios.isAxiosError(error)) {
+        const status = error.response?.status
+        const ghMessage = error.response?.data?.message ?? error.message
 
-      logger.error(
-        { message: exception.message, name: exception.name },
-        'Failed to fetch latest commit'
-      )
+        logger.error(
+          { status, ghMessage, repoUrl, branch },
+          'GitHub: failed to fetch latest commit'
+        )
 
-      throw new ExternalServiceError('GitHub', 'Failed to fetch latest commit')
+        if (status === 401 || status === 403) {
+          throw new ExternalServiceError(
+            'GitHub',
+            'Authentication failed — your GitHub token may have expired. Please reconnect your GitHub account.'
+          )
+        }
+        if (status === 404 || status === 422) {
+          throw new ExternalServiceError(
+            'GitHub',
+            `Branch "${branch}" not found in "${repoToPath(repoUrl)}". Check your environment branch setting.`
+          )
+        }
+
+        throw new ExternalServiceError('GitHub', `Failed to fetch latest commit: ${ghMessage}`)
+      }
+
+      throw new ExternalServiceError('GitHub', `Failed to fetch latest commit: ${(error as Error).message}`)
     }
   }
 
@@ -97,6 +113,10 @@ export class GitHubRepositoryProvider implements RepositoryProviderPort {
 
       return String(res.data.id)
     } catch (error) {
+      if (axios.isAxiosError(error) && error.response?.status === 422) {
+        // Hook already exists for this URL — treat as success
+        return 'existing'
+      }
       const exception = error as Error
       throw new ExternalServiceError('Github', `Webhook setup failed: ${exception.message}`)
     }

@@ -16,9 +16,9 @@ import type { DeploymentStatus } from "@trigger-orchestra/shared";
 const statusBorderColor: Record<DeploymentStatus, string> = {
   success:   "border-l-emerald-500",
   failed:    "border-l-red-500",
-  running:   "border-l-blue-500",
+  deploying: "border-l-blue-500",
+  building:  "border-l-yellow-500",
   queued:    "border-l-blue-400",
-  pending:   "border-l-yellow-500",
   cancelled: "border-l-zinc-500",
 };
 
@@ -127,7 +127,7 @@ export default function DashboardPage() {
 
   const successful = deployments.filter((d) => d.status === "success").length;
   const failed     = deployments.filter((d) => d.status === "failed").length;
-  const running    = deployments.filter((d) => d.status === "running" || d.status === "queued").length;
+  const running    = deployments.filter((d) => ["queued","building","deploying"].includes(d.status)).length;
   const successRate = deployments.length
     ? Math.round((successful / deployments.length) * 100)
     : 0;
@@ -247,8 +247,7 @@ export default function DashboardPage() {
                       {d.commitMessage ?? "Manual trigger"}
                     </p>
                     <p className="text-xs text-muted-foreground truncate">
-                      {d.provider && <span className="capitalize">{d.provider}</span>}
-                      {d.branch && <> · <span className="font-mono">{d.branch}</span></>}
+                      <span className="capitalize">{d.platform}</span>
                       {d.commitSha && <> · <span className="font-mono">{d.commitSha.slice(0, 7)}</span></>}
                     </p>
                   </div>

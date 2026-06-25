@@ -5,7 +5,6 @@ import { Deployment, DeploymentLog } from '@modules/deployment/domain/entities/D
 import { DeploymentTypeOrmEntity } from '@modules/deployment/adapters/outbound/entities/DeploymentEntity'
 import { DeploymentLogTypeOrmEntity } from '@modules/deployment/adapters/outbound/entities/DeploymentLogEntity'
 import { DeploymentStatus } from '@shared/types'
-import { en } from 'zod/v4/locales'
 
 export class DeploymentTypeOrmRepository implements DeploymentRepository {
   private readonly deploymentRepository: Repository<DeploymentTypeOrmEntity>
@@ -58,7 +57,23 @@ export class DeploymentTypeOrmRepository implements DeploymentRepository {
     return this.logRepository.save(entity)
   }
 
+  async findLastSuccessful(environmentId: string): Promise<Deployment | null> {
+    return this.deploymentRepository.findOne({
+      where: { environmentId, status: 'success' as DeploymentStatus },
+      order: { completedAt: 'DESC' },
+    })
+  }
+
   async getLogs(deploymentId: string): Promise<DeploymentLog[]> {
     return this.logRepository.find({ where: { deploymentId }, order: { timestamp: 'ASC' } })
+  }
+
+  async findInProgress(): Promise<Deployment[]> {
+    return this.deploymentRepository.find({
+      where: [
+        { status: 'building' as DeploymentStatus },
+        { status: 'deploying' as DeploymentStatus },
+      ],
+    })
   }
 }

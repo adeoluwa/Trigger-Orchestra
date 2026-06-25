@@ -1,5 +1,5 @@
-import {v4 as uuidv4} from 'uuid';
 import { ProjectRepository, EnvironmentRepository, RepositoryProviderPort, ConfigParsePort } from '@modules/project/domain/ports';
+import { DeploymentProviderFactory } from '@modules/deployment/domain/ports';
 import { AuthRepository } from '@modules/auth/domain/ports';
 import { CreateProjectDto, ParseConfigDto, UpdateProjectDto } from '../dto';
 import { Project, Environment } from '@modules/project/domain/entities/Project';
@@ -27,7 +27,7 @@ export class ProjectService {
     private readonly repositoryProvider: RepositoryProviderPort,
     private readonly configParser: ConfigParsePort,
     private readonly authRepository: AuthRepository,
-    // private readonly logger: typeof logger
+    private readonly providerFactory: DeploymentProviderFactory,
   ) {}
 
   async createProject(dto: CreateProjectDto, ownerId: string): Promise<CreateProjectResult> {
@@ -55,18 +55,16 @@ export class ProjectService {
 
     if (!validation.valid) throw new InvalidConfigError(validation.errors.join('; '));
     
-    const project = await this.projectRepository.save({
+    const projectData = {
       name: dto.name,
       ownerId,
       repoUrl: dto.repoUrl,
-      repoProvider: 'github',
+      repoProvider: 'github' as const,
       configPath: dto.configPath,
       updatedAt: new Date()
-    });
+    }
 
     const environmentData = Object.entries(parsedConfig.environments).map(([name, envConfig]) => ({
-      id: uuidv4(),
-      projectId: project.id,
       name,
       platform: envConfig.platform,
       branch: envConfig.branch,
@@ -89,7 +87,7 @@ export class ProjectService {
       platformServiceId: null
     }))
 
-    const environments = await this.environmentRepository.saveMany(environmentData)
+    const { project, environments } = await this.projectRepository.saveWithEnvironments(projectData, environmentData)
 
     try {
       await this.repositoryProvider.setupWebhook(
@@ -98,9 +96,9 @@ export class ProjectService {
         env.GITHUB_WEBHOOK_SECRET,
         user.githubToken
       )
-    } catch {
+    } catch (err) {
       // non fatal
-      logger.error(`Failed to set up webhook for project ${project.id}. Webhooks will not work until this is resolved.`)
+      logger.error(`Failed to set up webhook for project ${project.id}: ${err instanceof Error ? err.message : String(err)}`)
     }
 
     return { project: { ...project,environments }, environments, parsedConfig }
@@ -131,6 +129,46 @@ export class ProjectService {
     return this.projectRepository.update(projectId, dto);
   }
 
+  async updateEnvironment(
+    environmentId: string,
+    requestingUserId: string,
+    data: { platformServiceId?: string | null; branch?: string }
+  ): Promise<Environment> {
+    const environment = await this.environmentRepository.findById(environmentId)
+    if (!environment) throw new NotFoundError('Environment')
+
+    const project = await this.projectRepository.findById(environment.projectId)
+    if (!project) throw new ProjectNotFoundError()
+    if (project.ownerId !== requestingUserId) throw new ProjectAccessDeniedError()
+
+    return this.environmentRepository.update(environmentId, data)
+  }
+
+  async provisionEnvironment(
+    environmentId: string,
+    requestingUserId: string,
+    params: { name: string; platformAccountId: string; buildCommand?: string; startCommand?: string }
+  ): Promise<Environment> {
+    const environment = await this.environmentRepository.findById(environmentId)
+    if (!environment) throw new NotFoundError('Environment')
+
+    const project = await this.projectRepository.findById(environment.projectId)
+    if (!project) throw new ProjectNotFoundError()
+    if (project.ownerId !== requestingUserId) throw new ProjectAccessDeniedError()
+
+    const provider = this.providerFactory.get(environment.platform)
+    const serviceId = await provider.createService({
+      name: params.name,
+      repoUrl: project.repoUrl,
+      branch: environment.branch,
+      platformAccountId: params.platformAccountId,
+      buildCommand: params.buildCommand,
+      startCommand: params.startCommand,
+    })
+
+    return this.environmentRepository.update(environmentId, { platformServiceId: serviceId })
+  }
+
   async deleteProject(projectId: string, requestingUserId: string): Promise<void>{
     const project = await this.projectRepository.findById(projectId);
 
@@ -138,7 +176,6 @@ export class ProjectService {
 
     if (project.ownerId !== requestingUserId) throw new ProjectAccessDeniedError();
 
-    await this.environmentRepository.deleteByProjectId(projectId)
     await this.projectRepository.delete(projectId)
   }
 

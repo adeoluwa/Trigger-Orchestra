@@ -3,8 +3,13 @@ import { ParsedConfig, ValidationResult } from '@shared/types'
 
 export interface ProjectRepository {
   save(project: Omit<Project, 'id' | 'createdAt' | 'updateAt' | 'environments'>): Promise<Project>
+  saveWithEnvironments(
+    project: Omit<Project, 'id' | 'createdAt' | 'updatedAt' | 'environments'>,
+    environments: Omit<Environment, 'id' | 'projectId' | 'createdAt' | 'updatedAt'>[]
+  ): Promise<{ project: Project; environments: Environment[] }>
   findById(id: string): Promise<Project | null>
   findByIdWithEnvironments(id: string): Promise<Project | null>
+  findByRepoUrl(repoUrl: string): Promise<Project | null>
   findByOwnerId(ownerId: string): Promise<Project[]>
   update(id: string, data: Partial<Project>): Promise<Project>
   delete(id: string): Promise<void>

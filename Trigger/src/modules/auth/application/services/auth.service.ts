@@ -94,6 +94,21 @@ export class AuthService {
     return { id: user.id, email: user.email, name: user.name, githubUsername: user.githubUsername }
   }
 
+  async createRepoConfig(userId: string, owner: string, repo: string, content: string): Promise<void> {
+    if (!this.githubOAuth) throw new Error('GitHub OAuth is not configured')
+    const user = await this.authRepository.findbyId(userId)
+    if (!user) throw new UnauthorizedError('User not found')
+    if (!user.githubToken) throw new UnauthorizedError('No GitHub token — please sign in with GitHub first')
+    await this.githubOAuth.createFile(
+      user.githubToken,
+      owner,
+      repo,
+      'trigger.yml',
+      content,
+      'chore: add trigger.yml deployment config'
+    )
+  }
+
   async getGithubRepos(userId: string) {
     if (!this.githubOAuth) throw new Error('GitHub OAuth is not configured')
     const user = await this.authRepository.findbyId(userId)

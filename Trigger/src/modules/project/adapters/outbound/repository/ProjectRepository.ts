@@ -7,8 +7,10 @@ import { ProjectEntity } from '../entities/Project.entity'
 
 export class ProjectOrmRepository implements ProjectRepository {
   private readonly repository: Repository<ProjectEntity>
+  private readonly dataSource: DataSource
 
   constructor(dataSource: DataSource) {
+    this.dataSource = dataSource
     this.repository = dataSource.getRepository(ProjectEntity)
   }
 
@@ -21,6 +23,23 @@ export class ProjectOrmRepository implements ProjectRepository {
     return { ...saved, environments: [] }
   }
 
+  async saveWithEnvironments(
+    projectData: Omit<Project, 'id' | 'createdAt' | 'updatedAt' | 'environments'>,
+    environmentsData: Omit<Environment, 'id' | 'projectId' | 'createdAt' | 'updatedAt'>[]
+  ): Promise<{ project: Project; environments: Environment[] }> {
+    return this.dataSource.transaction(async (manager) => {
+      const projectEntity = manager.create(ProjectEntity, { ...projectData, id: uuidv4() } as ProjectEntity)
+      const savedProject = await manager.save(ProjectEntity, projectEntity)
+
+      const envEntities = environmentsData.map((d) =>
+        manager.create(EnvironmentEntity, { ...d, id: uuidv4(), projectId: savedProject.id } as EnvironmentEntity)
+      )
+      const savedEnvs = await manager.save(EnvironmentEntity, envEntities)
+
+      return { project: { ...savedProject, environments: [] }, environments: savedEnvs }
+    })
+  }
+
   async findById(id: string): Promise<Project | null> {
     const entity = await this.repository.findOneBy({ id })
 
@@ -31,6 +50,10 @@ export class ProjectOrmRepository implements ProjectRepository {
 
   async findByIdWithEnvironments(id: string): Promise<Project | null> {
     return this.repository.findOne({ where: { id }, relations: { environments: true } })
+  }
+
+  async findByRepoUrl(repoUrl: string): Promise<Project | null> {
+    return this.repository.findOne({ where: { repoUrl }, relations: { environments: true } })
   }
 
   async findByOwnerId(ownerId: string): Promise<Project[]> {

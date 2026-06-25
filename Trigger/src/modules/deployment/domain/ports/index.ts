@@ -7,17 +7,34 @@ export interface DeploymentRepository {
   findById(id: string): Promise<Deployment | null>
   findByEnvironmentId(environmentId: string): Promise<Deployment[]>
   findByProjectId(projectId: string): Promise<Deployment[]>
+  findLastSuccessful(environmentId: string): Promise<Deployment | null>
   updateStatus(id: string, status: DeploymentStatus, platformDeploymentId?: string): Promise<void>
   complete(id: string, status: 'success' | 'failed'): Promise<void>
   appendLog(deploymentId: string, log: Omit<DeploymentLog, 'id'>): Promise<DeploymentLog>
   getLogs(deploymentId: string): Promise<DeploymentLog[]>
+  findInProgress(): Promise<Deployment[]>
+}
+
+export interface CreateServiceParams {
+  name: string
+  repoUrl: string
+  branch: string
+  platformAccountId: string
+  buildCommand?: string
+  startCommand?: string
 }
 
 export interface DeploymentProviderPort {
+  createService(params: CreateServiceParams): Promise<string>
   deploy(
     environment: Environment,
     commitSha: string,
     envVars: Record<string, string>
+  ): Promise<string>
+  rollback(
+    lastPlatformDeploymentId: string,
+    lastCommitSha: string,
+    environment: Environment
   ): Promise<string>
   getStatus(platformDeploymentId: string, environment: Environment): Promise<DeploymentStatus>
   streamLogs(

@@ -8,10 +8,14 @@ export function createDeploymentRouter(controller: DeploymentController): Router
   router.use(authGuard)
 
   router.post('/trigger', controller.trigger)
-  router.post('/:id/cancel', controller.cancel)
-  router.get('/:id/logs', controller.getLogs)
-  router.get('/:id/logs/stream', controller.streamLogs)
+  router.get('/project/:projectId/summary', controller.getSummary)
   router.get('/project/:projectId', controller.listByProject)
+  router.get('/', controller.listAll)
+  router.post('/environments/:environmentId/cancel-active', controller.cancelActive)
+  router.get('/:id/logs/stream', controller.streamLogs)
+  router.get('/:id/logs', controller.getLogs)
+  router.post('/:id/cancel', controller.cancel)
+  router.get('/:id', controller.getOne)
 
   return router
 }

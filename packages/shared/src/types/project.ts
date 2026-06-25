@@ -13,6 +13,10 @@ export interface Environment {
   id: string;
   name: string;
   projectId: string;
+  platform: string;
+  branch: string;
+  status: 'idle' | 'deploying' | 'deployed' | 'failed';
+  platformServiceId: string | null;
   createdAt: string;
   updatedAt: string;
 }

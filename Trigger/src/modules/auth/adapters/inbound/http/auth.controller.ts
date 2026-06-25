@@ -61,6 +61,19 @@ export class AuthController {
     }
   }
 
+  createRepoConfig = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const { id } = (req as AuthenticatedRequest).user
+      const { owner, repo } = req.params as { owner: string, repo: string };
+      const { content } = req.body as { content: string }
+      if (!content) throw new ValidationError('content is required')
+      await this.authService.createRepoConfig(id, owner, repo, content)
+      res.status(HttpStatus.CREATED).json(successResponse({ message: 'trigger.yml created' }))
+    } catch (error) {
+      next(error)
+    }
+  }
+
   githubRepos = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const { id } = (req as AuthenticatedRequest).user

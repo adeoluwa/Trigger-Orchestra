@@ -12,6 +12,7 @@ export function createAuthRouter(controller: AuthController): Router {
   router.get('/github', controller.githubRedirect)
   router.get('/github/callback', controller.githubCallback)
   router.get('/github/repos', authGuard, controller.githubRepos)
+  router.post('/github/repos/:owner/:repo/config', authGuard, controller.createRepoConfig)
 
   return router
 }

@@ -2,12 +2,14 @@
 
 import { use, useState } from "react";
 import Link from "next/link";
-import { ArrowLeft, Globe, Rocket, ArrowRight, Settings } from "lucide-react";
+import { ArrowLeft, Globe, Rocket, ArrowRight, Settings, XCircle } from "lucide-react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { useProject } from "@/hooks/use-projects";
 import { useDeployments } from "@/hooks/use-deployments";
+import { DeploymentSummaryPanel } from "@/components/deployment-summary-panel";
 import { formatRelative } from "@/lib/utils";
 import { cn } from "@/lib/utils";
 import { api } from "@/lib/api";
@@ -19,25 +21,49 @@ function TriggerDialog({
   onTriggered,
 }: {
   projectId: string;
-  environments: { id: string; name: string }[];
+  environments: { id: string; name: string; status?: string }[];
   onTriggered: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [environmentId, setEnvironmentId] = useState(environments[0]?.id ?? "");
   const [loading, setLoading] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const selectedEnv = environments.find((e) => e.id === environmentId);
+  const isStuck = selectedEnv?.status === "deploying";
 
   async function handleTrigger() {
     if (!environmentId) return;
     setLoading(true);
+    setError(null);
     try {
-      await api.post<ApiResponse<Deployment>>("/deployments", {
+      await api.post<ApiResponse<Deployment>>("/deployments/trigger", {
         projectId,
         environmentId,
       } satisfies TriggerDeploymentRequest);
       setOpen(false);
       onTriggered();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to trigger deployment");
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleCancelActive() {
+    if (!environmentId) return;
+    setCancelling(true);
+    setError(null);
+    try {
+      await api.post<ApiResponse<unknown>>(`/deployments/environments/${environmentId}/cancel-active`, {});
+      toast.success("Active deployment cancelled. You can now re-deploy.");
+      onTriggered();
+      setOpen(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to cancel deployment");
+    } finally {
+      setCancelling(false);
     }
   }
 
@@ -80,11 +106,28 @@ function TriggerDialog({
               </div>
             )}
 
+            {isStuck && (
+              <div className="rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-3 py-2.5 flex flex-col gap-1.5">
+                <p className="text-xs text-yellow-400 font-medium">A deployment is already in progress for this environment.</p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="gap-1.5 self-start border-yellow-500/40 text-yellow-400 hover:text-yellow-300"
+                  onClick={handleCancelActive}
+                  disabled={cancelling}
+                >
+                  <XCircle className="size-3.5" />
+                  {cancelling ? "Cancelling…" : "Cancel active deployment"}
+                </Button>
+              </div>
+            )}
+
+            {error && <p className="text-xs text-destructive">{error}</p>}
             <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+              <Button variant="outline" onClick={() => setOpen(false)}>Close</Button>
               <Button
                 onClick={handleTrigger}
-                disabled={loading || environments.length === 0}
+                disabled={loading || environments.length === 0 || isStuck}
               >
                 {loading ? "Triggering…" : "Deploy now"}
               </Button>
@@ -99,9 +142,9 @@ function TriggerDialog({
 const statusBorderColor: Record<string, string> = {
   success:   "border-l-emerald-500",
   failed:    "border-l-red-500",
-  running:   "border-l-blue-500",
+  deploying: "border-l-blue-500",
+  building:  "border-l-yellow-500",
   queued:    "border-l-blue-400",
-  pending:   "border-l-yellow-500",
   cancelled: "border-l-zinc-500",
 };
 
@@ -175,6 +218,9 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
         </Card>
       </div>
 
+      {/* Deployment summary — branch → platform → service mapping */}
+      <DeploymentSummaryPanel projectId={id} />
+
       {/* Deployments */}
       <div>
         <div className="flex items-center justify-between mb-4">
@@ -205,8 +251,8 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-medium truncate">{d.commitMessage ?? "Manual trigger"}</p>
                     <p className="text-xs text-muted-foreground">
-                      {d.provider && <span className="capitalize">{d.provider}</span>}
-                      {d.branch && <> · <span className="font-mono">{d.branch}</span></>}
+                      <span className="capitalize">{d.platform}</span>
+                      {d.commitSha && <> · <span className="font-mono">{d.commitSha.slice(0, 7)}</span></>}
                     </p>
                   </div>
                   <span className="text-xs text-muted-foreground shrink-0">{formatRelative(d.createdAt)}</span>

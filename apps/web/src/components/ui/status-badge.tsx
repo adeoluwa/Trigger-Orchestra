@@ -2,16 +2,19 @@ import { cn } from "@/lib/utils";
 import type { DeploymentStatus } from "@trigger-orchestra/shared";
 
 const statusConfig: Record<DeploymentStatus, { label: string; classes: string }> = {
-  pending:   { label: "Pending",   classes: "bg-yellow-500/15 text-yellow-400 border-yellow-500/25" },
-  queued:    { label: "Queued",    classes: "bg-blue-500/15 text-blue-400 border-blue-500/25" },
-  running:   { label: "Running",   classes: "bg-blue-500/15 text-blue-400 border-blue-500/25 animate-pulse" },
-  success:   { label: "Success",   classes: "bg-green-500/15 text-green-400 border-green-500/25" },
-  failed:    { label: "Failed",    classes: "bg-red-500/15 text-red-400 border-red-500/25" },
-  cancelled: { label: "Cancelled", classes: "bg-zinc-500/15 text-zinc-400 border-zinc-500/25" },
+  queued:    { label: "Queued",     classes: "bg-blue-500/15 text-blue-400 border-blue-500/25" },
+  building:  { label: "Building",   classes: "bg-yellow-500/15 text-yellow-400 border-yellow-500/25 animate-pulse" },
+  deploying: { label: "Deploying",  classes: "bg-blue-500/15 text-blue-400 border-blue-500/25 animate-pulse" },
+  success:   { label: "Success",    classes: "bg-green-500/15 text-green-400 border-green-500/25" },
+  failed:    { label: "Failed",     classes: "bg-red-500/15 text-red-400 border-red-500/25" },
+  cancelled: { label: "Cancelled",  classes: "bg-zinc-500/15 text-zinc-400 border-zinc-500/25" },
 };
 
-export function StatusBadge({ status }: { status: DeploymentStatus }) {
-  const config = statusConfig[status] ?? statusConfig.pending;
+export function StatusBadge({ status }: { status: string }) {
+  const config = statusConfig[status as DeploymentStatus] ?? {
+    label: status,
+    classes: "bg-zinc-500/15 text-zinc-400 border-zinc-500/25",
+  };
   return (
     <span
       className={cn(

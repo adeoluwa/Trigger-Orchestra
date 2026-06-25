@@ -25,6 +25,10 @@ export class SecretTypeOrmRepository implements SecretRepository {
     return this.repository.save(entity)
   }
 
+  async findById(id: string): Promise<Secret | null> {
+    return this.repository.findOneBy({ id })
+  }
+
   async findByEnvironmentId(environmentId: string): Promise<Secret[]> {
     return this.repository.findBy({ environmentId })
   }

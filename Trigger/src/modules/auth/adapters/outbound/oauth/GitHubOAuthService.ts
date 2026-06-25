@@ -50,6 +50,29 @@ export class GitHubOAuthService implements GitHubOAuthPort {
     }
   }
 
+  async createFile(
+    accessToken: string,
+    owner: string,
+    repo: string,
+    path: string,
+    content: string,
+    message: string
+  ): Promise<void> {
+    const headers = {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+    }
+
+    const encoded = Buffer.from(content).toString('base64')
+
+    await axios.put(
+      `https://api.github.com/repos/${owner}/${repo}/contents/${path}`,
+      { message, content: encoded },
+      { headers }
+    )
+  }
+
   async getRepos(accessToken: string): Promise<GitHubRepo[]> {
     const headers = {
       Authorization: `Bearer ${accessToken}`,

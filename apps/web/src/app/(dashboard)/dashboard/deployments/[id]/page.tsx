@@ -1,13 +1,18 @@
 "use client";
 
-import { use, useEffect, useRef } from "react";
+import { use, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { ArrowLeft, ExternalLink, GitCommit, GitBranch } from "lucide-react";
+import { ArrowLeft, ExternalLink, GitCommit, XCircle } from "lucide-react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { StatusBadge } from "@/components/ui/status-badge";
-import { useDeployment, useDeploymentLogs } from "@/hooks/use-deployments";
+import { useDeployment, useDeploymentStream } from "@/hooks/use-deployments";
 import { formatDate, formatRelative, cn } from "@/lib/utils";
+import { api } from "@/lib/api";
+import type { ApiResponse } from "@trigger-orchestra/shared";
+
+const ACTIVE_STATUSES = new Set(["queued", "building", "deploying"]);
 
 const logLevelClass: Record<string, string> = {
   info: "text-foreground",
@@ -17,18 +22,42 @@ const logLevelClass: Record<string, string> = {
 
 export default function DeploymentDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
-  const { deployment, isLoading } = useDeployment(id);
-  const { logs } = useDeploymentLogs(id);
+
+  const { logs, liveStatus, connected } = useDeploymentStream(id);
+  const { deployment, isLoading, mutate } = useDeployment(id, { poll: !connected });
+
   const logsEndRef = useRef<HTMLDivElement>(null);
+  const [cancelling, setCancelling] = useState(false);
+
+  // Refresh deployment record once SSE stream closes after completion
+  useEffect(() => {
+    if (liveStatus && !ACTIVE_STATUSES.has(liveStatus)) {
+      mutate();
+    }
+  }, [liveStatus]);
 
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs.length]);
 
-  if (isLoading) return <p className="text-sm text-muted-foreground">Loading…</p>;
+  async function handleCancel() {
+    setCancelling(true);
+    try {
+      await api.post<ApiResponse<unknown>>(`/deployments/${id}/cancel`, {});
+      toast.success("Deployment cancelled.");
+      mutate();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to cancel deployment.");
+    } finally {
+      setCancelling(false);
+    }
+  }
+
+  if (isLoading && !deployment) return <p className="text-sm text-muted-foreground">Loading…</p>;
   if (!deployment) return <p className="text-sm text-muted-foreground">Deployment not found.</p>;
 
-  const isLive = deployment.status === "running" || deployment.status === "queued" || deployment.status === "pending";
+  const status = liveStatus ?? deployment.status;
+  const isLive = ACTIVE_STATUSES.has(status);
 
   return (
     <div className="flex flex-col gap-6">
@@ -40,48 +69,67 @@ export default function DeploymentDetailPage({ params }: { params: Promise<{ id:
         </Link>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2.5 flex-wrap">
-            <StatusBadge status={deployment.status} />
+            <StatusBadge status={status} />
             <span className="text-sm font-medium truncate">
               {deployment.commitMessage ?? "Manual trigger"}
             </span>
           </div>
           <p className="text-xs text-muted-foreground mt-0.5">
-            {deployment.provider} · {formatRelative(deployment.createdAt)}
+            {deployment.platform} · {formatRelative(deployment.createdAt)}
           </p>
         </div>
-        {deployment.providerDeploymentUrl && (
-          <a href={deployment.providerDeploymentUrl} target="_blank" rel="noreferrer">
-            <Button variant="outline" size="sm" className="gap-1.5 shrink-0">
-              <ExternalLink className="size-3.5" />
-              Open on {deployment.provider}
+        <div className="flex items-center gap-2 shrink-0">
+          {isLive && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1.5 text-destructive hover:text-destructive"
+              onClick={handleCancel}
+              disabled={cancelling}
+            >
+              <XCircle className="size-3.5" />
+              {cancelling ? "Cancelling…" : "Cancel"}
             </Button>
-          </a>
-        )}
+          )}
+          {deployment.platformDeploymentId && (
+            <a
+              href={`https://dashboard.${deployment.platform}.com/deploys/${deployment.platformDeploymentId}`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              <Button variant="outline" size="sm" className="gap-1.5">
+                <ExternalLink className="size-3.5" />
+                Open on {deployment.platform}
+              </Button>
+            </a>
+          )}
+        </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4 text-xs">
-        {deployment.branch && (
-          <Card className="p-3 flex items-center gap-2">
-            <GitBranch className="size-3.5 text-muted-foreground shrink-0" />
-            <span>{deployment.branch}</span>
-          </Card>
-        )}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         {deployment.commitSha && (
-          <Card className="p-3 flex items-center gap-2">
-            <GitCommit className="size-3.5 text-muted-foreground shrink-0" />
-            <span className="font-mono">{deployment.commitSha.slice(0, 7)}</span>
+          <Card className="p-3 flex flex-col gap-0.5">
+            <p className="text-[10px] uppercase tracking-widest text-muted-foreground/50">Commit</p>
+            <p className="text-xs font-mono flex items-center gap-1.5">
+              <GitCommit className="size-3 text-muted-foreground shrink-0" />
+              {deployment.commitSha.slice(0, 7)}
+            </p>
           </Card>
         )}
+        <Card className="p-3 flex flex-col gap-0.5">
+          <p className="text-[10px] uppercase tracking-widest text-muted-foreground/50">Platform</p>
+          <p className="text-xs capitalize">{deployment.platform}</p>
+        </Card>
         {deployment.startedAt && (
           <Card className="p-3 flex flex-col gap-0.5">
-            <span className="text-muted-foreground">Started</span>
-            <span>{formatDate(deployment.startedAt)}</span>
+            <p className="text-[10px] uppercase tracking-widest text-muted-foreground/50">Started</p>
+            <p className="text-xs">{formatDate(deployment.startedAt)}</p>
           </Card>
         )}
-        {deployment.finishedAt && (
+        {deployment.completedAt && (
           <Card className="p-3 flex flex-col gap-0.5">
-            <span className="text-muted-foreground">Finished</span>
-            <span>{formatDate(deployment.finishedAt)}</span>
+            <p className="text-[10px] uppercase tracking-widest text-muted-foreground/50">Finished</p>
+            <p className="text-xs">{formatDate(deployment.completedAt)}</p>
           </Card>
         )}
       </div>
@@ -89,7 +137,7 @@ export default function DeploymentDetailPage({ params }: { params: Promise<{ id:
       <div>
         <div className="flex items-center justify-between mb-2">
           <h2 className="text-sm font-medium">Logs</h2>
-          {isLive && (
+          {connected && (
             <span className="flex items-center gap-1.5 text-xs text-blue-400">
               <span className="size-1.5 rounded-full bg-blue-400 animate-pulse" />
               Live
@@ -100,10 +148,10 @@ export default function DeploymentDetailPage({ params }: { params: Promise<{ id:
           {logs.length === 0 ? (
             <span className="text-zinc-500">{isLive ? "Waiting for logs…" : "No logs recorded."}</span>
           ) : (
-            logs.map((log) => (
-              <div key={log.id} className={cn("flex gap-3", logLevelClass[log.level] ?? "text-foreground")}>
+            logs.map((log, i) => (
+              <div key={log.id ?? i} className={cn("flex gap-3", logLevelClass[log.level] ?? "text-foreground")}>
                 <span className="text-zinc-600 shrink-0 select-none">
-                  {new Date(log.createdAt).toLocaleTimeString()}
+                  {new Date(log.timestamp).toLocaleTimeString()}
                 </span>
                 <span className="break-all">{log.message}</span>
               </div>

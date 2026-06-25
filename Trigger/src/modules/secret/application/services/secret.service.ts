@@ -4,7 +4,7 @@ import { ProjectRepository } from '@modules/project/domain/ports'
 import { Secret } from '@modules/secret/domain/entities/Secret'
 import { NotFoundError, ForbiddenError } from '@shared/errors'
 import { StoreSecretDto } from '../dtos'
-import { encrypt } from '@utils/crypto'
+import { encrypt, decrypt } from '@utils/crypto'
 
 export class SecretService {
   constructor(
@@ -44,6 +44,24 @@ export class SecretService {
       createdAt,
       updatedAt,
     }))
+  }
+
+  async revealSecret(secretId: string, requestingUserId: string): Promise<string> {
+    const secret = await this.secretRepository.findById(secretId)
+
+    if (!secret) throw new NotFoundError('Secret')
+
+    const environment = await this.environmentRepository.findById(secret.environmentId)
+
+    if (!environment) throw new NotFoundError('Environment')
+
+    const project = await this.projectRepository.findById(environment.projectId)
+
+    if (!project) throw new NotFoundError('Project')
+
+    if (project.ownerId !== requestingUserId) throw new ForbiddenError()
+
+    return decrypt(secret.encryptedValue)
   }
 
   async deleteSecret(secretId: string, projectId: string, requestingUserId: string): Promise<void> {

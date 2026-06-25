@@ -19,3 +19,13 @@ export class PlatformNotSupportedError extends AppError {
     super(`Platform "${platform}" is not supported`, 422, 'PLATFORM_NOT_SUPPORTED')
   }
 }
+
+export class StagingGateError extends AppError {
+  constructor() {
+    super(
+      'Production deployments require a passing staging deployment. Deploy to staging first.',
+      409,
+      'STAGING_GATE_FAILED'
+    )
+  }
+}

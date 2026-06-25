@@ -1,0 +1,956 @@
+================================================================================
+  TRIGGER ORCHESTRA — SYSTEM ARCHITECTURE DESIGN
+  Last updated: 2026-06-15
+================================================================================
+
+
+────────────────────────────────────────────────────────────────────────────────
+1. OVERVIEW
+────────────────────────────────────────────────────────────────────────────────
+
+Trigger Orchestra is a deployment orchestration platform that lets developers
+push code from GitHub repositories to cloud platforms (Railway, Render) through
+a single dashboard. The system is configured by a `trigger.yml` file in the
+repo root that defines environments, branches, and target platforms.
+
+High-level components:
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │                         Client Layer                                    │
+  │   Next.js 16 (React 19, App Router, Tailwind v4, shadcn/ui, SWR)       │
+  │   apps/web/  ─────────────────────────────────────────  :3001           │
+  └────────────────────────────┬────────────────────────────────────────────┘
+                               │  REST / JSON  (Bearer JWT)
+  ┌────────────────────────────▼────────────────────────────────────────────┐
+  │                         API Layer                                       │
+  │   Express (TypeScript), Hexagonal Architecture, Zod validation         │
+  │   Trigger/  ──────────────────────────────────────────  :3000           │
+  └──┬──────────┬───────────┬───────────┬────────────────────────────────── ┘
+     │          │           │           │
+  PostgreSQL  Redis      GitHub       Railway / Render
+  (TypeORM)  (BullMQ +  (OAuth +      (Deployment
+             Locks)      REST API)     providers)
+
+
+────────────────────────────────────────────────────────────────────────────────
+2. MONOREPO STRUCTURE
+────────────────────────────────────────────────────────────────────────────────
+
+  Trigger-orchestra/                  ← pnpm workspace root
+  ├── pnpm-workspace.yaml             ← declares: Trigger/, apps/*, packages/*
+  ├── turbo.json                      ← Turborepo task graph (build, dev, lint)
+  ├── package.json                    ← root scripts: dev, dev:api, dev:web
+  ├── tsconfig.base.json              ← shared TS config (ES2020, strict)
+  ├── sysDys.txt                      ← this document
+  │
+  ├── Trigger/                        ← Backend API (Express)
+  │   ├── src/
+  │   │   ├── main.ts                 ← app entry point
+  │   │   ├── config/env.ts           ← Zod env validation (fail-fast on startup)
+  │   │   ├── infra/                  ← infrastructure (DB, cache, queues, server)
+  │   │   ├── modules/                ← domain modules (auth, project, deployment, secret)
+  │   │   ├── shared/                 ← cross-module types, guards, error classes
+  │   │   └── utils/                  ← jwt, crypto, yaml parser, pagination
+  │   └── scripts/
+  │       └── load-test.ts            ← reliability test runner (idempotency, backpressure)
+  │
+  ├── apps/
+  │   └── web/                        ← Next.js 16 frontend
+  │       └── src/
+  │           ├── app/                ← App Router pages
+  │           ├── components/         ← UI + layout components
+  │           ├── hooks/              ← SWR data-fetching hooks
+  │           └── lib/                ← API client, auth helpers, utils
+  │
+  └── packages/
+      └── shared/                     ← Shared TypeScript types
+          └── src/types/              ← auth, project, deployment, secret, api
+
+
+────────────────────────────────────────────────────────────────────────────────
+3. BACKEND ARCHITECTURE
+────────────────────────────────────────────────────────────────────────────────
+
+3.1 DESIGN PATTERN — HEXAGONAL ARCHITECTURE (PORTS & ADAPTERS)
+───────────────────────────────────────────────────────────────
+
+Each domain module follows the same three-layer structure:
+
+  Domain Layer (Core)
+  │   - Pure interfaces (ports) — no external dependencies
+  │   - Business entities (plain TypeScript interfaces)
+  │   - Domain errors (extend AppError)
+  │
+  Application Layer (Use Cases)
+  │   - Service classes consume only domain ports
+  │   - Business logic lives here exclusively
+  │   - Validated by Zod DTOs before entering the service
+  │
+  Adapter Layer (External Contracts)
+      Inbound:  HTTP controllers + routes (Express)
+                Queue consumer (BullMQ worker)
+      Outbound: TypeORM repositories
+                Platform providers (Railway, Render)
+                OAuth/GitHub API service
+                JWT token service
+                Encryption utilities
+
+This means: the service doesn't know about HTTP, TypeORM, or BullMQ —
+it only knows about the port interfaces injected at startup.
+
+3.2 DEPENDENCY INJECTION
+────────────────────────
+
+There is no IoC container. Each module exports a factory function that
+manually wires up all dependencies:
+
+  createAuthModule(dataSource)       → { router }
+  createProjectModule(dataSource)    → { router }
+  createDeploymentModule(dataSource, queue) → { router }
+  createSecretModule(dataSource)     → { router }
+
+These factories are called once in infra/server/routes.ts at startup.
+The deployment worker (deployment.consumer.ts) builds its own service
+instance with the same pattern.
+
+3.3 STARTUP SEQUENCE
+─────────────────────
+
+  main.ts
+    1. Validate all env vars (Zod schema — process.exit(1) on failure)
+    2. AppDataSource.initialize() — run TypeORM migrations, open DB pool
+    3. getRedis()                 — open ioredis connection, test connectivity
+    4. createExpressApp()         — Helmet, CORS, rate-limit, JSON body parser
+    5. registerRoutes(app)        — mount all module routers under /api/v1
+    6. mountBullBoard(app)        — mount Bull Board at /admin/queues
+    7. mountSwagger(app)          — mount Swagger UI at /api/docs
+    8. app.listen(PORT)
+    9. startDeploymentWorker()    — start BullMQ consumer (concurrency: 3)
+
+
+────────────────────────────────────────────────────────────────────────────────
+4. MODULE REFERENCE
+────────────────────────────────────────────────────────────────────────────────
+
+4.1 AUTH MODULE
+───────────────
+
+  Responsibility: user identity, credentials, OAuth, GitHub API access
+
+  Files:
+    domain/entities/User.ts               — User interface
+    domain/errors/AuthErrors.ts           — EmailAlreadyExistError, InvalidCredentialsError
+    domain/ports/index.ts                 — AuthRepository, TokenService, GitHubOAuthPort
+
+    application/services/auth.service.ts  — Core use cases (see below)
+    application/dtos/index.ts             — RegisterUserSchema, LoginUserSchema, RefreshTokenSchema
+
+    adapters/outbound/entities/UserRepository.ts      — TypeORM: users table
+    adapters/outbound/jwt/JwtTokenService.ts          — signs/verifies access + refresh tokens
+    adapters/outbound/oauth/GitHubOAuthService.ts     — GitHub OAuth + REST API
+    adapters/inbound/http/auth.controller.ts          — HTTP handler methods
+    adapters/inbound/http/auth.routes.ts              — Express route definitions
+    auth.module.ts                                    — DI factory
+
+  Use Cases (auth.service.ts):
+    register(dto)          — hash password, save user, issue tokens
+    login(dto)             — verify password, issue tokens (rotate refresh)
+    githubLogin(code)      — exchange OAuth code, upsert user, issue tokens
+    getProfile(userId)     — fetch name + githubUsername from DB
+    refresh(dto)           — rotate refresh token (detect reuse attacks)
+    getGithubRepos(userId) — fetch user's repos via stored GitHub token
+    createRepoConfig(...)  — push trigger.yml to GitHub via Contents API
+
+  Token Strategy:
+    Access token  — JWT HS256, 7d TTL, payload: { id, email }
+    Refresh token — JWT HS256, 30d TTL, payload: { sub: userId }
+    Both stored in DB; refresh token rotated on every use.
+    Reuse detected: if stored token != presented token → invalidate + throw.
+
+  GitHub OAuth Flow:
+    Browser → GET /auth/github         (redirects to GitHub authorization page)
+    GitHub  → GET /auth/github/callback?code=...
+    Server:   exchange code for token, upsert user, redirect to:
+              {FRONTEND_URL}/auth/callback?token=...&refreshToken=...
+    Frontend: parse URL params, save to localStorage, call /auth/me, go to /dashboard
+
+  HTTP Endpoints:
+    POST   /api/v1/auth/register
+    POST   /api/v1/auth/login
+    POST   /api/v1/auth/refresh
+    GET    /api/v1/auth/me                         [auth required]
+    GET    /api/v1/auth/github                     → redirects to GitHub
+    GET    /api/v1/auth/github/callback            → redirects to frontend
+    GET    /api/v1/auth/github/repos               [auth required]
+    POST   /api/v1/auth/github/repos/:owner/:repo/config  [auth required]
+
+4.2 PROJECT MODULE
+──────────────────
+
+  Responsibility: project + environment lifecycle, trigger.yml parsing
+
+  Files:
+    domain/entities/Project.ts            — Project, Environment interfaces
+    domain/errors/ProjectErrors.ts        — NotFound, AccessDenied, InvalidConfig, RepoAccess
+    domain/ports/index.ts                 — ProjectRepository, EnvironmentRepository,
+                                            RepositoryProviderPort, ConfigParsePort
+
+    application/services/project.service.ts  — Core use cases (see below)
+    application/dto/index.ts                 — CreateProjectSchema, UpdateProjectSchema
+
+    adapters/outbound/repository/ProjectRepository.ts      — TypeORM: projects table
+    adapters/outbound/repository/EnvironmentRepository.ts  — TypeORM: environments table
+    adapters/outbound/github/GitHubRepositoryProvider.ts   — GitHub: commits, file read, webhooks
+    adapters/outbound/config/YamlConfigParser.ts           — parse + validate trigger.yml
+    adapters/inbound/http/project.controller.ts
+    adapters/inbound/http/project.routes.ts
+    project.module.ts
+
+  Use Cases:
+    createProject(dto, userId)     — validate repo access, fetch + parse trigger.yml,
+                                     persist project + all environments from YAML
+    listProjects(userId)           — projects owned by this user
+    getProject(id, userId)         — single project with environments (access check)
+    updateProject(id, dto, userId) — update name/configPath
+    deleteProject(id, userId)      — cascade delete environments
+    parseConfigPreview(dto)        — parse YAML without persisting (for UI preview)
+
+  trigger.yml Schema (parsed by YamlConfigParser):
+    environments:
+      - name: production
+        branch: main
+        platform: railway | render
+        platformServiceId: optional-existing-service-id
+        envVars: {}   (overrides; real secrets live in the secrets table)
+
+  HTTP Endpoints:
+    POST   /api/v1/projects
+    GET    /api/v1/projects
+    GET    /api/v1/projects/:id
+    PATCH  /api/v1/projects/:id
+    DELETE /api/v1/projects/:id
+    POST   /api/v1/projects/config/preview
+
+4.3 DEPLOYMENT MODULE
+─────────────────────
+
+  Responsibility: deploy execution, async job processing, rollback, log streaming
+
+  Files:
+    domain/entities/Deployment.ts     — Deployment, DeploymentLog interfaces
+    domain/errors/DeploymentErrors.ts — NotFound, AccessDenied, AlreadyRunning, CannotCancel
+    domain/ports/index.ts             — DeploymentRepository, DeploymentProviderPort,
+                                        DeploymentProviderFactory
+
+    application/services/deployment.service.ts  — Core use cases
+    application/dto/index.ts                     — TriggerDeploymentSchema
+
+    adapters/outbound/DeploymentProviderFactoryImpl.ts       — factory: platform → provider
+    adapters/outbound/railway/RailwayDeploymentProvider.ts   — Railway GraphQL adapter
+    adapters/outbound/render/RenderDeploymentProvider.ts     — Render REST adapter
+    adapters/outbound/repository/DeploymentRepository.ts     — TypeORM
+    adapters/inbound/http/deployment.controller.ts
+    adapters/inbound/http/deployment.routes.ts
+    adapters/inbound/queue/deployment.consumer.ts            — BullMQ worker
+    deployment.module.ts
+
+  Use Cases:
+    triggerDeployment(dto, userId)
+      1. Validate environment + project ownership
+      2. Acquire Redis lock (SETNX, 720s TTL) → 409 if already locked
+      3. Fetch latest commit SHA from GitHub
+      4. Save deployment record (status: queued)
+      5. Set environment status → deploying
+      6. Enqueue BullMQ job (jobId = deploymentId for deduplication)
+      7. Return deployment record
+
+    processDeployment(jobData)   [runs inside BullMQ worker]
+      1. Fetch deployment + environment records
+      2. Update status: queued → building
+      3. Resolve secrets for environment (decrypt)
+      4. Call provider.deploy() → platformDeploymentId
+      5. Update status → deploying
+      6. provider.streamLogs() — poll platform every 5s, append to DB
+      7. provider.getStatus() — get final outcome
+      8. On SUCCESS: complete(success), env → deployed, release lock
+      9. On FAILURE:
+           a. complete(failed)
+           b. findLastSuccessful(environmentId)
+           c. If found: provider.rollback(lastPlatformId, lastCommitSha, env)
+              - stream rollback logs
+              - poll rollback status
+              - env → deployed (success) or failed
+           d. If not found: env → failed
+      10. finally: release lock (always)
+
+    cancelDeployment(id, userId)
+      - Validate, call provider.cancel(), complete(failed), release lock
+
+    getLogs(id, userId)          — fetch all logs for a deployment (sorted by timestamp)
+    listByProject(projectId)     — all deployments for a project
+    getDeployment(id, userId)    — single deployment with access check
+
+  Deployment Status State Machine:
+    queued → building → deploying → success
+                                  → failed → (rollback) → deploying → success
+                                                                     → failed
+
+  Platform Providers — Common Interface (DeploymentProviderPort):
+    deploy(environment, commitSha, envVars)  → platformDeploymentId
+    rollback(lastPlatformId, lastCommitSha, environment) → platformDeploymentId
+    getStatus(platformDeploymentId, environment) → DeploymentStatus
+    streamLogs(platformDeploymentId, environment, onLog) → void (polls)
+    cancel(platformDeploymentId, environment) → void
+
+  Railway Provider (GraphQL):
+    deploy:    serviceInstanceRedeploy or serviceCreate mutation
+    rollback:  deploymentRedeploy(id) — re-runs exact historical build
+    status:    deployment(id) query → maps BUILDING/DEPLOYING/SUCCESS/FAILED
+    logs:      deployment(id) { logs } query — polled every 5s, up to 120 polls
+    cancel:    deploymentCancel(id) mutation
+    env vars:  variableCollectionUpsert mutation (before deploy)
+
+  Render Provider (REST):
+    deploy:    POST /services/:id/deploys  (or POST /services for new service)
+    rollback:  POST /services/:id/deploys with { commitId: lastCommitSha }
+    status:    GET  /deploys/:id → maps live/failed/build_in_progress
+    logs:      GET  /services/:id/logs?deployId=...  — polled every 5s
+    cancel:    POST /deploys/:id/cancel
+    env vars:  PUT  /services/:id/env-vars (before deploy)
+
+  HTTP Endpoints:
+    POST   /api/v1/deployments                    [auth required]
+    GET    /api/v1/deployments/:id                [auth required]
+    DELETE /api/v1/deployments/:id                [auth required]
+    GET    /api/v1/deployments/:id/logs           [auth required]
+    GET    /api/v1/deployments/:id/logs/stream    [SSE, auth required]
+
+4.4 SECRET MODULE
+─────────────────
+
+  Responsibility: encrypted per-environment secrets injected at deploy time
+
+  Files:
+    domain/entities/Secret.ts          — Secret interface
+    domain/ports/index.ts              — SecretRepository
+    application/services/secret.service.ts
+    application/dtos/index.ts          — StoreSecretSchema
+    adapters/outbound/entities/SecretOrmRepository.ts
+    adapters/inbound/http/secret.controller.ts
+    adapters/inbound/http/secret.routes.ts
+    secret.module.ts
+
+  Use Cases:
+    storeSecret(dto)             — AES-encrypt value, upsert by (environmentId, key)
+    listForEnvironment(envId)    — return secrets without exposing encrypted value
+    deleteSecret(id)             — remove secret
+    resolveForEnvironment(envId) — decrypt all secrets → Record<string, string>
+                                   (called by deployment worker before deploy)
+
+  Encryption:
+    Algorithm: AES-256-CBC
+    Key source: ENCRYPTION_KEY env var (exactly 32 chars)
+    Stored as: hex-encoded cipher text in secrets.encryptedValue column
+
+  HTTP Endpoints:
+    POST   /api/v1/secrets              [auth required]
+    GET    /api/v1/secrets?environmentId=...  [auth required]
+    DELETE /api/v1/secrets/:id          [auth required]
+
+
+────────────────────────────────────────────────────────────────────────────────
+5. INFRASTRUCTURE LAYER
+────────────────────────────────────────────────────────────────────────────────
+
+5.1 EXPRESS SERVER (infra/server/)
+───────────────────────────────────
+
+  express.ts:
+    - helmet()            — security headers (XSS, clickjacking, etc.)
+    - cors()              — allowed origins from FRONTEND_URL env var
+    - express-rate-limit  — global rate limiting (configurable)
+    - express.json()      — JSON body parser
+    - pino-http           — request/response logging middleware
+    - error.middleware.ts — global catch-all: maps AppError → HTTP response
+
+  routes.ts:
+    Mounts all module routers under /api/v1
+
+  swagger.ts:
+    Swagger UI at /api/docs (enabled when DOCS_ENABLED=true)
+
+  bullboard.ts:
+    Bull Board admin at /admin/queues
+    Shows queue depth, job history, retry controls for deployment queue
+
+5.2 DATABASE (infra/database/)
+───────────────────────────────
+
+  Engine:     PostgreSQL
+  ORM:        TypeORM
+  Migration:  1780245945373-InitialSchema.ts  (single migration, creates all tables)
+
+  Tables:
+  ┌──────────────────┬──────────────────────────────────────────────────────┐
+  │ users            │ id, email, name, passwordHash, githubToken,          │
+  │                  │ githubUsername, refreshToken, isVerified,            │
+  │                  │ createdAt, updatedAt                                 │
+  ├──────────────────┼──────────────────────────────────────────────────────┤
+  │ projects         │ id, name, repoUrl, configPath, ownerId → users.id,   │
+  │                  │ createdAt, updatedAt                                 │
+  ├──────────────────┼──────────────────────────────────────────────────────┤
+  │ environments     │ id, projectId → projects.id, name, branch, platform, │
+  │                  │ platformServiceId, status, createdAt, updatedAt      │
+  ├──────────────────┼──────────────────────────────────────────────────────┤
+  │ deployments      │ id, environmentId, projectId, triggeredBy,           │
+  │                  │ commitSha, commitMessage, status, platform,          │
+  │                  │ platformDeploymentId, startedAt, completedAt         │
+  ├──────────────────┼──────────────────────────────────────────────────────┤
+  │ deployment_logs  │ id, deploymentId → deployments.id, message, level,   │
+  │                  │ source, timestamp                                    │
+  ├──────────────────┼──────────────────────────────────────────────────────┤
+  │ secrets          │ id, environmentId, key, encryptedValue, createdAt,   │
+  │                  │ updatedAt                                            │
+  └──────────────────┴──────────────────────────────────────────────────────┘
+
+  Indexes:
+    deployments(environmentId), deployments(projectId)
+    deployment_logs(deploymentId)
+    secrets(environmentId)
+    environments(projectId)
+
+5.3 REDIS (infra/cache/ + infra/lock/)
+───────────────────────────────────────
+
+  redis.config.ts:
+    Singleton ioredis client (getRedis())
+    Used by: DeploymentLock, Bull Board health check
+    Retry strategy: exponential backoff, max 10 retries, cap at 3s
+
+  DeploymentLock (infra/lock/DeploymentLock.ts):
+    Purpose: prevent concurrent deployments to the same environment
+    Mechanism: SET lock:deploy:{environmentId} 1 EX 720 NX
+      - Returns true (acquired) or false (already locked)
+      - TTL 720s = 12 min (matches max log-stream window)
+      - Acquired in HTTP handler (triggerDeployment)
+      - Released in worker finally block (processDeployment)
+      - Also released by cancelDeployment
+
+5.4 BULLMQ QUEUES (infra/queue/)
+──────────────────────────────────
+
+  bullmq.config.ts:
+    Connection: raw { host, port, password } options passed to BullMQ
+    (avoids ioredis version type mismatch — BullMQ manages its own client)
+
+  Queues:
+  ┌───────────────────┬─────────┬─────────────────────────────────────────┐
+  │ Queue             │ Retries │ Notes                                   │
+  ├───────────────────┼─────────┼─────────────────────────────────────────┤
+  │ deployment        │ 3       │ exponential backoff (5s base)           │
+  │                   │         │ keep 100 completed, 200 failed          │
+  ├───────────────────┼─────────┼─────────────────────────────────────────┤
+  │ notification      │ 5       │ exponential backoff (2s base)           │
+  │                   │         │ keep 50 completed, 200 failed           │
+  └───────────────────┴─────────┴─────────────────────────────────────────┘
+
+  Worker settings (createWorker):
+    concurrency: 3     — max 3 deployments processed simultaneously
+    limiter: { max: 10, duration: 5000 }  — max 10 job starts per 5s window
+                                            (backpressure guard for burst traffic)
+
+  Job schema (DeploymentJobData):
+    { deploymentId, environmentId, projectId, platform: 'railway' | 'render' }
+
+  Job names:
+    PROCESS_DEPLOYMENT  — main worker path
+    CANCEL_DEPLOYMENT   — defined but dispatched via HTTP cancel endpoint
+
+5.5 LOGGER (infra/logger/)
+────────────────────────────
+
+  Engine: Pino
+  Dev: pretty-print with colors
+  Prod: structured JSON with redacted sensitive fields
+  Used across: all modules, worker, error middleware, queue event listeners
+
+5.6 EMAIL (infra/email/)
+─────────────────────────
+
+  Engine: Resend
+  Configured in resend.config.ts
+  Used for: account notifications (verification, alerts)
+
+
+────────────────────────────────────────────────────────────────────────────────
+6. SHARED UTILITIES & MIDDLEWARE
+────────────────────────────────────────────────────────────────────────────────
+
+  utils/jwt.ts
+    generateAccessToken(payload)   — HS256, JWT_SECRET, JWT_EXPIRES_IN
+    generateRefreshToken(userId)   — HS256, JWT_REFRESH_SECRET, JWT_REFRESH_EXPIRES_IN
+    verifyAccessToken(token)       — throws on expired/invalid
+    verifyRefreshToken(token)      — throws on expired/invalid
+
+  utils/crypto.ts
+    hashPassword(password)         — bcryptjs, cost factor 12
+    comparePassword(plain, hash)   — bcryptjs verify
+    encrypt(text)                  — AES-256-CBC, returns hex string
+    decrypt(hex)                   — AES-256-CBC, returns plaintext
+
+  utils/yaml.parser.ts
+    parseYaml(content)             — wraps js-yaml, returns parsed object
+
+  utils/pagination.ts
+    paginate(query, page, limit)   — TypeORM pagination helper
+
+  shared/http/ApiResponse.ts
+    Standard response envelope:
+      Success: { success: true,  data: T }
+      Error:   { success: false, error: { code, message, fields? } }
+
+  shared/guards/auth.guard.ts
+    Express middleware, extracts Bearer token, calls verifyAccessToken,
+    attaches { id, email } to req.user as AuthenticatedRequest
+
+  shared/errors/index.ts
+    AppError(message, statusCode, code)
+    NotFoundError       → 404  NOT_FOUND
+    UnauthorizedError   → 401  UNAUTHORIZED
+    ForbiddenError      → 403  FORBIDDEN
+    ValidationError     → 422  VALIDATION_ERROR  (optional field errors map)
+    ConflictError       → 409  CONFLICT
+    ExternalServiceError→ 502  EXTERNAL_SERVICE_ERROR
+
+  shared/http/error.middleware.ts
+    Global Express error handler:
+    - AppError instances → structured JSON with statusCode
+    - Unknown errors in prod → 500 INTERNAL_SERVER_ERROR (no leak of details)
+    - Logs all 5xx errors via Pino
+
+
+────────────────────────────────────────────────────────────────────────────────
+7. FRONTEND ARCHITECTURE
+────────────────────────────────────────────────────────────────────────────────
+
+7.1 ROUTE STRUCTURE (Next.js App Router)
+──────────────────────────────────────────
+
+  apps/web/src/app/
+  ├── layout.tsx                — root: fonts (Geist), metadata, globals.css
+  ├── page.tsx                  — "/" redirects to /login
+  │
+  ├── (auth)/                   — route group: no URL segment, uses auth layout
+  │   ├── layout.tsx            — split-screen: DeployAnimation left, form right
+  │   ├── login/page.tsx        — email + password form, GitHub OAuth button
+  │   └── register/page.tsx     — name + email + password form
+  │
+  ├── auth/
+  │   └── callback/page.tsx     — receives ?token=&refreshToken= from backend OAuth,
+  │                               saves to localStorage, redirects to /dashboard
+  │
+  └── (dashboard)/              — route group: uses dashboard layout (sidebar)
+      ├── layout.tsx            — sidebar + main content area
+      └── dashboard/
+          ├── page.tsx          — Overview: stats, recent deployments
+          ├── projects/
+          │   ├── page.tsx      — project list + create modal
+          │   └── [id]/
+          │       ├── page.tsx         — project detail + environments + deploy buttons
+          │       ├── settings/page.tsx — edit name, config path, view YAML environments
+          │       └── secrets/page.tsx  — per-environment secret management
+          ├── repositories/
+          │   └── page.tsx      — GitHub repos browser, search/filter,
+          │                       connect repo as project, create trigger.yml modal
+          ├── deployments/
+          │   ├── page.tsx      — deployment history across all projects
+          │   └── [id]/page.tsx — deployment detail with live log streaming (SWR polling)
+          └── secrets/
+              └── page.tsx      — all secrets across all environments
+
+7.2 STYLING
+────────────
+
+  Tailwind v4 (PostCSS-based, no config file)
+  Color theme: sky blue (oklch), dark mode default
+  Component library: shadcn/ui (Base UI / @base-ui/react)
+  Brand: Workflow icon (lucide-react), sky blue primary (#0284c7 equiv in oklch)
+
+  globals.css sets CSS custom properties:
+    --primary: oklch(0.64 0.18 220)   ← sky blue
+    --primary-foreground, --ring, --sidebar-primary, etc.
+
+7.3 API CLIENT (lib/api.ts)
+────────────────────────────
+
+  Thin fetch wrapper — api.get<T>(path), api.post<T>(path, body), etc.
+  - Reads Bearer token from localStorage on each call
+  - Parses { success, data, error } envelope
+  - Throws descriptive Error with field-level messages on failure
+  - Base URL: process.env.NEXT_PUBLIC_API_URL (defaults to :3000/api/v1)
+
+7.4 AUTH STATE (lib/auth.ts)
+─────────────────────────────
+
+  localStorage keys:
+    access_token     — JWT access token
+    refresh_token    — JWT refresh token
+    user             — serialized User object
+
+  Functions:
+    saveTokens(access, refresh)
+    clearTokens()
+    saveUser(user)
+    getStoredUser() → User | null
+    isAuthenticated() → boolean
+
+  Note: all reads are guarded by useMounted() hook to prevent SSR hydration
+  mismatches (localStorage is browser-only).
+
+7.5 DATA FETCHING HOOKS (hooks/)
+─────────────────────────────────
+
+  All hooks use SWR for client-side fetching.
+
+  use-auth.ts       — login(), register(), logout(), user state, loading/error
+  use-projects.ts   — useProjects(), useProject(id), create/update/delete mutations
+  use-deployments.ts — useDeployments(projectId), useDeployment(id),
+                       useDeploymentLogs(id) — 2s polling for live log updates
+  use-secrets.ts    — useSecrets(environmentId), storeSecret(), deleteSecret()
+  use-github.ts     — GitHub OAuth redirect, useGithubRepos() — repo list
+  use-mounted.ts    — returns true only after first client-side render
+
+7.6 KEY COMPONENTS
+───────────────────
+
+  components/layout/sidebar.tsx
+    Navigation links: Overview, Projects, Repositories, Deployments, Secrets
+    Bottom: user avatar, name, GitHub username (hydration-safe via useMounted)
+    Brand logo: Workflow icon (lucide-react) + "Trigger Orchestra" wordmark
+
+  components/deploy-animation.tsx
+    Looping terminal animation shown on the auth screen left panel
+    Sky blue accent colors, Workflow icon, deployment step progression
+
+  components/ui/
+    Button, Card, Badge, Input, Label, Separator, Avatar, Tabs,
+    DropdownMenu, Alert, Dialog, StatusBadge, GitHubIcon
+
+  dashboard/repositories/page.tsx (most complex page)
+    - Lists GitHub repos with search + public/private filter
+    - "Add project" button connects a repo as a project
+    - On failure (missing trigger.yml) shows amber error banner
+    - "Create trigger.yml" opens CreateConfigModal:
+        Configure tab: environment rows (name, branch, platform) + add/remove
+        Preview YAML tab: live-rendered YAML from form inputs
+        On submit: POST /auth/github/repos/:owner/:repo/config
+
+
+────────────────────────────────────────────────────────────────────────────────
+8. SHARED TYPES PACKAGE (packages/shared/)
+────────────────────────────────────────────────────────────────────────────────
+
+  types/api.ts
+    ApiResponse<T>         — { success: boolean, data?: T, error?: ApiError }
+    PaginatedResponse<T>   — { items: T[], total, page, limit }
+    PaginationQuery        — { page?, limit? }
+
+  types/auth.ts
+    User                   — { id, email, name, githubUsername?, createdAt? }
+    LoginRequest           — { email, password }
+    RegisterRequest        — { email, name, password }
+    AuthResponse           — { user: User, accessToken, refreshToken }
+    GithubRepo             — GitHub repo metadata
+
+  types/project.ts
+    Project                — { id, name, repoUrl, configPath, userId, environments[] }
+    Environment            — { id, name, branch, platform, status, platformServiceId? }
+    CreateProjectRequest   — { name, repoUrl, configPath? }
+
+  types/deployment.ts
+    DeploymentStatus       — 'queued' | 'building' | 'deploying' | 'success' | 'failed' | 'cancelled'
+    DeploymentProvider     — 'railway' | 'render'
+    Deployment             — full deployment record
+    DeploymentLog          — { id, deploymentId, message, level, source, timestamp }
+    TriggerDeploymentRequest — { projectId, environmentId }
+
+  types/secret.ts
+    Secret                 — { id, environmentId, key, createdAt }
+    CreateSecretRequest    — { environmentId, key, value }
+
+
+────────────────────────────────────────────────────────────────────────────────
+9. EXTERNAL SERVICES & INTEGRATIONS
+────────────────────────────────────────────────────────────────────────────────
+
+  ┌──────────────────┬─────────────────────┬──────────────────────────────────┐
+  │ Service          │ Protocol            │ Purpose                          │
+  ├──────────────────┼─────────────────────┼──────────────────────────────────┤
+  │ GitHub OAuth     │ OAuth 2.0 + REST    │ User login, repo listing,         │
+  │                  │                     │ file creation, commit fetching,   │
+  │                  │                     │ webhook setup                    │
+  ├──────────────────┼─────────────────────┼──────────────────────────────────┤
+  │ Railway          │ GraphQL             │ Deploy services, sync env vars,   │
+  │                  │ (backboard.railway) │ stream logs, rollback, cancel    │
+  ├──────────────────┼─────────────────────┼──────────────────────────────────┤
+  │ Render           │ REST (api.render)   │ Deploy services, sync env vars,   │
+  │                  │                     │ stream logs, rollback, cancel    │
+  ├──────────────────┼─────────────────────┼──────────────────────────────────┤
+  │ PostgreSQL       │ TCP / TypeORM       │ Primary data store, migrations    │
+  ├──────────────────┼─────────────────────┼──────────────────────────────────┤
+  │ Redis            │ TCP / ioredis       │ BullMQ job queue + pub/sub,       │
+  │                  │                     │ deployment distributed locks     │
+  ├──────────────────┼─────────────────────┼──────────────────────────────────┤
+  │ Resend           │ REST                │ Transactional email (account      │
+  │                  │                     │ notifications)                   │
+  └──────────────────┴─────────────────────┴──────────────────────────────────┘
+
+
+────────────────────────────────────────────────────────────────────────────────
+10. ENVIRONMENT VARIABLES REFERENCE
+────────────────────────────────────────────────────────────────────────────────
+
+  Server
+    NODE_ENV              development | production | test
+    PORT                  default: 3000
+    APP_URL               default: http://localhost:3000
+    FRONTEND_URL          default: http://localhost:3001
+    DOCS_ENABLED          default: true
+
+  Database
+    DB_HOST               required
+    DB_PORT               default: 5432
+    DB_NAME               required
+    DB_USER               required
+    DB_PASSWORD           required
+
+  Redis
+    REDIS_HOST            required
+    REDIS_PORT            default: 6379
+    REDIS_PASSWORD        optional
+
+  JWT / Auth
+    JWT_SECRET            required, min 32 chars
+    JWT_EXPIRES_IN        default: 7d
+    JWT_REFRESH_SECRET    required, min 32 chars
+    JWT_REFRESH_EXPIRES_IN default: 30d
+
+  Encryption
+    ENCRYPTION_KEY        required, exactly 32 chars (AES-256-CBC key)
+
+  GitHub
+    GITHUB_CLIENT_ID      required (OAuth App Client ID — not a PAT)
+    GITHUB_CLIENT_SECRET  required
+    GITHUB_CALLBACK_URL   required (e.g. http://localhost:3000/api/v1/auth/github/callback)
+    GITHUB_WEBHOOK_SECRET required
+
+  Railway
+    RAILWAY_API_TOKEN     required
+    RAILWAY_API_URL       default: https://backboard.railway.app/graphql/v2
+
+  Render
+    RENDER_API_TOKEN      required
+    RENDER_API_URL        default: https://api.render.com/v1
+
+  Email
+    RESEND_API_KEY        required
+    EMAIL_FROM            default: noreply@trigger.dev
+
+  Frontend (apps/web/.env.local)
+    NEXT_PUBLIC_API_URL   e.g. http://localhost:3000/api/v1
+
+
+────────────────────────────────────────────────────────────────────────────────
+11. RELIABILITY MECHANISMS
+────────────────────────────────────────────────────────────────────────────────
+
+11.1 IDEMPOTENCY / RACE-CONDITION PREVENTION
+────────────────────────────────────────────
+
+  Problem: two concurrent HTTP requests for the same environment would both
+  pass the status check and create two deployments.
+
+  Solution: Redis SETNX lock in triggerDeployment()
+    Key:  lock:deploy:{environmentId}
+    TTL:  720 seconds (12 minutes)
+    Flow: acquire → proceed OR reject with 409 DEPLOYMENT_ALREADY_RUNNING
+    Release: always in worker processDeployment() finally block
+
+  This makes the lock span two separate system boundaries (HTTP handler →
+  worker), which is safe because TTL handles crash recovery automatically.
+
+11.2 ATOMIC ROLLBACK
+─────────────────────
+
+  Triggered automatically when processDeployment() detects final status = failed.
+
+  Algorithm:
+    1. Query findLastSuccessful(environmentId) → most recent status='success' row
+    2. If none: mark env failed, log "no rollback candidate"
+    3. If found:
+       a. Call provider.rollback(lastPlatformDeploymentId, lastCommitSha, env)
+       b. Set env → deploying (rollback in flight)
+       c. Stream rollback logs (same log record, source='platform')
+       d. Poll status until terminal
+       e. Set env → deployed (success) or failed
+
+  The original failed deployment record stays as-is (status='failed').
+  Rollback actions appear as additional log entries within the same deployment.
+
+11.3 BACKPRESSURE
+──────────────────
+
+  BullMQ Worker limiter: { max: 10, duration: 5000 }
+    - At most 10 jobs start per 5-second window across all workers
+    - Surplus jobs wait in the queue (Redis-backed, durable)
+
+  Worker concurrency: 3
+    - At most 3 deployments processed in parallel
+
+  BullMQ retry: 3 attempts, exponential backoff starting at 5s
+    - Handles transient failures (network blip, API timeout)
+
+11.4 RELIABILITY TEST SCRIPT (scripts/load-test.ts)
+─────────────────────────────────────────────────────
+
+  Test 1 — Idempotency:
+    Fire 50 concurrent POST /deployments/trigger to same environment.
+    Pass condition: exactly 1 accepted (201), 49 rejected (409).
+
+  Test 2 — Backpressure:
+    50 requests round-robined across N environments.
+    Pass condition: N accepted (one per env), remainder 409.
+    Observe queue depth at /admin/queues.
+
+  Test 3 — Rollback (manual):
+    Inject BUILD_SHOULD_FAIL=true as a secret, trigger deploy,
+    observe log sequence showing automatic rollback to last good commit.
+
+  Usage:
+    API_URL=http://localhost:3000/api/v1 \
+    ACCESS_TOKEN=<jwt> \
+    PROJECT_ID=<uuid> \
+    ENVIRONMENT_ID=<uuid> \
+    npx ts-node Trigger/scripts/load-test.ts [1|2|3|all]
+
+
+────────────────────────────────────────────────────────────────────────────────
+12. DATA FLOW — END-TO-END DEPLOY
+────────────────────────────────────────────────────────────────────────────────
+
+  User clicks "Deploy" in the dashboard
+       │
+       ▼
+  POST /api/v1/deployments  { projectId, environmentId }
+       │
+       ▼
+  auth.guard.ts — verify JWT, attach { id, email } to req
+       │
+       ▼
+  DeploymentController.trigger()
+       │
+       ▼
+  DeploymentService.triggerDeployment()
+    ├─ find environment (DB)
+    ├─ find project + check ownership (DB)
+    ├─ acquire Redis lock (SETNX) ──────────── 409 if locked
+    ├─ find user GitHub token (DB)
+    ├─ fetch latest commit SHA (GitHub API)
+    ├─ save deployment record status=queued (DB)
+    ├─ set environment status=deploying (DB)
+    └─ enqueue BullMQ job { deploymentId, environmentId, ... }
+       │
+       ▼  (async — HTTP returns 201 with deployment record)
+  BullMQ worker picks up job
+       │
+       ▼
+  DeploymentService.processDeployment()
+    ├─ status → building
+    ├─ resolve + decrypt secrets (DB)
+    ├─ provider.deploy()             → Railway GraphQL / Render REST
+    ├─ status → deploying
+    ├─ provider.streamLogs()         → polls platform every 5s, appends to DB
+    ├─ provider.getStatus()          → final outcome
+    │
+    ├─ SUCCESS path:
+    │    complete(success), env → deployed, release lock
+    │
+    └─ FAILURE path:
+         complete(failed)
+         findLastSuccessful() → if found:
+           provider.rollback() → new platformDeploymentId
+           set env → deploying
+           streamLogs (rollback)
+           getStatus (rollback)
+           env → deployed | failed
+         release lock (always, via finally)
+       │
+       ▼
+  Frontend polls GET /deployments/:id/logs every 2s (SWR)
+  UI updates status badge and appends log lines in real time
+
+
+────────────────────────────────────────────────────────────────────────────────
+13. DATA FLOW — GITHUB OAUTH LOGIN
+────────────────────────────────────────────────────────────────────────────────
+
+  User clicks "Sign in with GitHub"
+       │
+       ▼
+  GET /api/v1/auth/github
+    → 302 redirect to github.com/login/oauth/authorize?client_id=...&scope=user:email repo
+       │
+       ▼ (user authorizes on GitHub)
+  GET /api/v1/auth/github/callback?code=...
+    ├─ exchange code for github_access_token (POST github.com/login/oauth/access_token)
+    ├─ fetch GitHub profile (GET api.github.com/user + /user/emails)
+    ├─ upsert user in DB (save githubToken, githubUsername)
+    ├─ issue JWT access + refresh tokens
+    └─ 302 redirect to {FRONTEND_URL}/auth/callback?token=...&refreshToken=...
+       │
+       ▼
+  apps/web/src/app/auth/callback/page.tsx
+    ├─ parse token + refreshToken from URL params
+    ├─ saveTokens() to localStorage
+    ├─ GET /auth/me → save user to localStorage
+    └─ router.push('/dashboard')
+
+
+────────────────────────────────────────────────────────────────────────────────
+14. DEV SETUP QUICK REFERENCE
+────────────────────────────────────────────────────────────────────────────────
+
+  Prerequisites: Node 20+, pnpm 9+, Docker (for Postgres + Redis) or local installs
+
+  Install:
+    pnpm install              (from monorepo root)
+
+  Start services:
+    docker compose up -d      (postgres + redis)
+
+  Backend:
+    cd Trigger
+    cp .env.example .env      (fill in all required vars)
+    pnpm dev                  → :3000
+
+  Frontend:
+    cd apps/web
+    cp .env.local.example .env.local
+    pnpm dev                  → :3001
+
+  Both:
+    pnpm dev                  (from root, via Turborepo)
+
+  Admin dashboards:
+    Bull Board  → http://localhost:3000/admin/queues
+    Swagger     → http://localhost:3000/api/docs
+
+  Load test:
+    API_URL=http://localhost:3000/api/v1 ACCESS_TOKEN=<jwt> \
+    PROJECT_ID=<uuid> ENVIRONMENT_ID=<uuid> \
+    npx ts-node Trigger/scripts/load-test.ts
+
+
+================================================================================
+  END OF DOCUMENT
+================================================================================

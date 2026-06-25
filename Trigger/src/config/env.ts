@@ -31,7 +31,7 @@ const envSchema = z.object({
   GITHUB_CALLBACK_URL: z.url(),
   GITHUB_WEBHOOK_SECRET: z.string().min(1),
 
-  RAILWAY_API_URL: z.url().default('https://backboard.railway.app/graphql/v2'),
+  RAILWAY_API_URL: z.url().default('https://backboard.railway.com/graphql/v2'),
   RAILWAY_API_TOKEN: z.string().min(1),
 
   RENDER_API_URL: z.url().default('https://api.render.com/v1'),

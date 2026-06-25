@@ -1,15 +1,43 @@
 "use client";
 
 import Link from "next/link";
-import { Rocket } from "lucide-react";
+import { Rocket, ArrowRight } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { useDeployments } from "@/hooks/use-deployments";
 import { formatRelative } from "@/lib/utils";
-import type { DeploymentStatus } from "@trigger-orchestra/shared";
+import type { Deployment, DeploymentStatus } from "@trigger-orchestra/shared";
 import { useState } from "react";
 
-const ALL_STATUSES: DeploymentStatus[] = ["pending", "queued", "running", "success", "failed", "cancelled"];
+const ALL_STATUSES: DeploymentStatus[] = ["queued", "building", "deploying", "success", "failed", "cancelled"];
+
+function DeploymentCard({ d }: { d: Deployment }) {
+  return (
+    <Link href={`/dashboard/deployments/${d.id}`}>
+      <div className="group relative flex flex-col gap-4 rounded-xl border border-border bg-card p-5 hover:border-primary/30 hover:bg-card/80 transition-all duration-150 h-full cursor-pointer">
+        <div className="flex items-start gap-3">
+          <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 ring-1 ring-primary/20">
+            <Rocket className="size-4 text-primary" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-semibold truncate">{d.commitMessage ?? "Manual trigger"}</p>
+            <p className="text-xs text-muted-foreground/50 mt-0.5 truncate font-mono">
+              {d.platform}{d.commitSha ? ` · ${d.commitSha.slice(0, 7)}` : ""}
+            </p>
+          </div>
+          <span className="shrink-0">
+            <StatusBadge status={d.status} />
+          </span>
+        </div>
+
+        <div className="flex items-center justify-between mt-auto pt-2 border-t border-border/50">
+          <p className="text-xs text-muted-foreground/60">{formatRelative(d.createdAt)}</p>
+          <ArrowRight className="size-3.5 text-muted-foreground/30 group-hover:text-primary transition-colors" />
+        </div>
+      </div>
+    </Link>
+  );
+}
 
 export default function DeploymentsPage() {
   const { deployments, isLoading } = useDeployments();
@@ -25,7 +53,7 @@ export default function DeploymentsPage() {
       </div>
 
       <div className="flex flex-wrap gap-1.5">
-        {["all", ...ALL_STATUSES].map((s) => (
+        {(["all", ...ALL_STATUSES] as const).map((s) => (
           <button
             key={s}
             onClick={() => setFilter(s as DeploymentStatus | "all")}
@@ -41,40 +69,20 @@ export default function DeploymentsPage() {
       </div>
 
       {isLoading ? (
-        <p className="text-sm text-muted-foreground">Loading…</p>
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {[1, 2, 3].map((i) => (
+            <div key={i} className="h-40 rounded-xl bg-card border border-border animate-pulse" />
+          ))}
+        </div>
       ) : filtered.length === 0 ? (
         <Card className="p-12 text-center">
           <Rocket className="size-10 mx-auto text-muted-foreground mb-3" />
           <p className="text-sm font-medium">No deployments</p>
         </Card>
       ) : (
-        <div className="flex flex-col gap-2">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {filtered.map((d) => (
-            <Link key={d.id} href={`/dashboard/deployments/${d.id}`}>
-              <Card className="px-4 py-3 flex items-center gap-4 hover:bg-card/80 transition-colors cursor-pointer">
-                <StatusBadge status={d.status} />
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium truncate">{d.commitMessage ?? "Manual trigger"}</p>
-                  <p className="text-xs text-muted-foreground">
-                    {d.provider} · {d.branch ?? "—"} · {d.commitSha?.slice(0, 7) ?? "—"}
-                  </p>
-                </div>
-                <div className="text-right shrink-0">
-                  <p className="text-xs text-muted-foreground">{formatRelative(d.createdAt)}</p>
-                  {d.providerDeploymentUrl && (
-                    <a
-                      href={d.providerDeploymentUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      onClick={(e) => e.stopPropagation()}
-                      className="text-xs underline underline-offset-4 text-muted-foreground"
-                    >
-                      View on {d.provider}
-                    </a>
-                  )}
-                </div>
-              </Card>
-            </Link>
+            <DeploymentCard key={d.id} d={d} />
           ))}
         </div>
       )}

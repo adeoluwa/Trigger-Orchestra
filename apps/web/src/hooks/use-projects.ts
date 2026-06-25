@@ -1,14 +1,14 @@
 import useSWR from "swr";
-import type { Project, ApiResponse, PaginatedResponse } from "@trigger-orchestra/shared";
+import type { Project, ApiResponse } from "@trigger-orchestra/shared";
 import { api } from "@/lib/api";
 
-const fetcher = (url: string) => api.get<ApiResponse<PaginatedResponse<Project>>>(url);
+const fetcher = (url: string) => api.get<ApiResponse<Project[]>>(url);
 
 export function useProjects() {
   const { data, error, isLoading, mutate } = useSWR("/projects", fetcher);
   return {
-    projects: data?.data?.data ?? [],
-    total: data?.data?.total ?? 0,
+    projects: data?.data ?? [],
+    total: data?.data?.length ?? 0,
     isLoading,
     error,
     mutate,

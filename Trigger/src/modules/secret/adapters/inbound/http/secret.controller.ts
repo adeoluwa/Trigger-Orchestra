@@ -38,6 +38,19 @@ export class SecretController {
     }
   }
 
+  reveal = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const value = await this.secretService.revealSecret(
+        req.params.id as string,
+        (req as AuthenticatedRequest).user.id
+      )
+
+      res.status(HttpStatus.OK).json(successResponse({ value }))
+    } catch (error) {
+      next(error)
+    }
+  }
+
   delete = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const { projectId } = req.query as { projectId: string }
